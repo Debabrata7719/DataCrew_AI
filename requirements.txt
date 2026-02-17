@@ -1,3 +1,19 @@
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+langchain
+langchain-groq
+fastmcp
+python-dotenv
+fastapi
+uvicorn[standard]
+pydantic
+python-docx 
+reportlab 
+openpyxl
+pymongo
+=======
+>>>>>>> aa2f0ba
 langchain>=0.3.0
 langchain-groq>=0.2.0
 fastmcp>=0.1.0
@@ -9,3 +25,7 @@ python-docx>=1.1.0
 reportlab>=4.2.0
 openpyxl>=3.1.0
 pymongo>=4.9.0
+<<<<<<< HEAD
+=======
+>>>>>>> 355deb4 (updated files)
+>>>>>>> aa2f0ba
