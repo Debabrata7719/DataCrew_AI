@@ -23,6 +23,16 @@ from pathlib import Path
 from src.email_service import send_email_direct
 from src.config import GROQ_API_KEY, EMAIL_ADDRESS
 from src.document_generator import DocumentGenerator, generate_report, generate_spreadsheet
+from src.employee_service import (
+    find_employee_by_name,
+    find_employees_by_job,
+    find_all_employees,
+    search_employees,
+    get_employee_emails_by_job,
+    get_all_employee_emails,
+    list_all_job_types,
+    test_connection,
+)
 from src.memory_system import (
     conversation_memory,
     add_user_message,
@@ -322,44 +332,262 @@ def cleanup_session_files(session_id: str):
                 print(f"Error removing session directory: {e}")
 
 
+# ─── MongoDB Employee Tools ────────────────────────────────────────────────────
+
+@tool
+def lookup_employee(name_or_role: str) -> str:
+    """
+    Look up employee(s) from the MongoDB database by name OR job role.
+    Use this BEFORE sending an email when user mentions a person's name or a job title.
+
+    Args:
+        name_or_role: A person's name OR a job role OR 'all' for everyone
+                      Examples: 'Rahul', 'backend developer', 'data scientist', 'all'
+
+    Returns:
+        Formatted list of matching employees with their email addresses
+    """
+    try:
+        query = name_or_role.strip().lower()
+
+        if query in ("all", "everyone", "all employees", "everybody"):
+            employees = find_all_employees()
+        else:
+            employees = search_employees(name_or_role)
+
+        if not employees:
+            return (
+                f"❌ No employees found matching '{name_or_role}'.\n"
+                f"Available job types: {', '.join(list_all_job_types())}"
+            )
+
+        lines = []
+        for emp in employees:
+            email = emp.get("email_id", "N/A")
+            valid = "✅" if email and "@" in email else "⚠️ invalid email"
+            lines.append(
+                f"• {emp.get('name','?')} | {emp.get('job_type','?')} | {email} {valid}"
+            )
+
+        return f"Found {len(employees)} employee(s):\n" + "\n".join(lines)
+
+    except Exception as e:
+        return f"❌ Database error: {str(e)}"
+
+
+@tool
+def send_email_to_employees(name_or_role: str, subject: str, message: str) -> str:
+    """
+    Look up employee(s) in MongoDB by name OR job role, then send them the email.
+    Use this when the user wants to email a person or group identified by name/role.
+
+    Examples of when to use this tool:
+    - "Send email to Rahul about the meeting"
+    - "Email all backend developers about the deployment"
+    - "Send to all data scientists about the Q1 report"
+    - "Email everyone about the holiday announcement"
+
+    Args:
+        name_or_role: Name or job role (e.g. 'Rahul', 'backend developer', 'all')
+        subject:      Email subject line
+        message:      Email body content (do NOT include sign-off, it is added automatically)
+
+    Returns:
+        Summary of emails sent with success/failure per recipient
+    """
+    session_id = current_session_context.get("session_id", "default")
+
+    try:
+        query = name_or_role.strip().lower()
+
+        if query in ("all", "everyone", "all employees", "everybody"):
+            employees = find_all_employees()
+        else:
+            employees = search_employees(name_or_role)
+
+        if not employees:
+            return (
+                f"❌ No employees found matching '{name_or_role}'.\n"
+                f"Available job types: {', '.join(list_all_job_types())}"
+            )
+
+        # Get attachments
+        all_files = []
+        if session_id in session_files:
+            all_files.extend(session_files[session_id])
+        if session_id in session_generated_files:
+            all_files.extend(session_generated_files[session_id])
+
+        results = []
+        sent_count = 0
+        failed_count = 0
+
+        for emp in employees:
+            email = emp.get("email_id", "").strip()
+            name  = emp.get("name", "Unknown")
+            role  = emp.get("job_type", "Unknown")
+
+            if not email or "@" not in email:
+                results.append(f"⚠️  {name} ({role}) — skipped: invalid email '{email}'")
+                failed_count += 1
+                continue
+
+            result = send_email_direct(
+                receiver_email=email,
+                subject=subject,
+                message=message,
+                attachment_paths=all_files if all_files else None
+            )
+
+            if "✅" in result:
+                results.append(f"✅ {name} ({role}) → {email}")
+                sent_count += 1
+            else:
+                results.append(f"❌ {name} ({role}) → {email} — {result}")
+                failed_count += 1
+
+        if all_files:
+            cleanup_session_files(session_id)
+
+        # Build clean recipient summary
+        sent_lines   = [r for r in results if r.startswith("✅")]
+        failed_lines = [r for r in results if not r.startswith("✅")]
+
+        summary_parts = [f"📧 Email sent successfully to {sent_count} recipient(s):\n"]
+
+        for line in sent_lines:
+            # line: "✅ Rahul Saha (Software Engineer) → rahul@gmail.com"
+            clean = line.replace("✅ ", "").strip()
+            if "→" in clean:
+                name_role, email_part = clean.split("→", 1)
+                name_only   = name_role.split("(")[0].strip()
+                email_clean = email_part.strip()
+                summary_parts.append(f"  • {name_only} — {email_clean}")
+            else:
+                summary_parts.append(f"  • {clean}")
+
+        if failed_lines:
+            summary_parts.append(f"\n⚠️ Skipped ({failed_count}):")
+            for line in failed_lines:
+                summary_parts.append(f"  {line}")
+
+        return "\n".join(summary_parts)
+
+    except Exception as e:
+        return f"❌ Error sending email: {str(e)}"
+
+
+@tool
+def list_employees(filter_role: str = "all") -> str:
+    """
+    List employees from the database, optionally filtered by job role.
+    Use when user asks 'who are the backend developers?' or 'show me all employees'.
+
+    Args:
+        filter_role: Job role to filter by, or 'all' for everyone
+
+    Returns:
+        Formatted list of employees
+    """
+    try:
+        if filter_role.lower() in ("all", "everyone", ""):
+            employees = find_all_employees()
+            header = "All employees"
+        else:
+            employees = find_employees_by_job(filter_role)
+            header = f"Employees matching '{filter_role}'"
+
+        if not employees:
+            return (
+                f"❌ No employees found for '{filter_role}'.\n"
+                f"Available job types: {', '.join(list_all_job_types())}"
+            )
+
+        lines = [f"👥 {header} ({len(employees)} found):"]
+        for emp in employees:
+            email = emp.get("email_id", "N/A")
+            status = "✅" if email and "@" in email else "⚠️ invalid"
+            lines.append(
+                f"  • {emp.get('name','?'):20s} | "
+                f"{emp.get('job_type','?'):25s} | "
+                f"{email} {status}"
+            )
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"❌ Database error: {str(e)}"
+
+
+# ─── Create Agent with ALL Tools ──────────────────────────────────────────────
+
 # Create agent with all tools
 agent = create_agent(
     model=llm,
     tools=[
+        # Email tools
         send_email_tool,
+        send_email_to_employees,
+        # Employee database tools
+        lookup_employee,
+        list_employees,
+        # Document creation tools
         create_word_document,
         create_pdf_document,
         create_excel_spreadsheet,
-        create_text_file
+        create_text_file,
     ],
-    system_prompt="""You are DebAI, an AI assistant that helps users send emails with attachments. You have two powerful capabilities:
+    system_prompt="""You are DebAI, a professional AI email assistant with DIRECT ACCESS to a MongoDB employee database.
 
-1. **Sending Uploaded Files**: When users upload files, you can send them via email.
+## RULE 1 — DOCUMENTS: ONLY CREATE WHEN EXPLICITLY ASKED
+❌ NEVER auto-generate a document unless the user explicitly says one of these words:
+   "create", "generate", "make", "write", "draft", "build" + "document/report/pdf/excel/spreadsheet/file"
 
-2. **Creating Documents**: You can CREATE documents on-demand:
-   - Word documents (.docx) - use create_word_document
-   - PDF documents (.pdf) - use create_pdf_document  
-   - Excel spreadsheets (.xlsx) - use create_excel_spreadsheet
-   - Text files (.txt) - use create_text_file
+✅ ONLY create a document when user says things like:
+   - "create a report and send it"
+   - "generate a PDF"
+   - "make an excel spreadsheet"
+   - "write a document"
 
-**When to Create Documents:**
-- User says "create a report/document/spreadsheet"
-- User says "generate a [document type]"
-- User wants you to write content and send it as a file
-- User asks for formatted documents
+✅ When user says "send email about X" → just send a plain email with X as the message body. NO document.
+✅ When user says "send meeting info" → just send a plain email. NO document.
+✅ When user says "send data of all data scientists" → just send a plain email with their info. NO document.
 
-**Examples:**
-- "Create a sales report and send it to boss@company.com" → create_word_document → send_email_tool
-- "Generate a meeting agenda PDF" → create_pdf_document
-- "Make a spreadsheet with Q1 data and email it" → create_excel_spreadsheet → send_email_tool
+## RULE 2 — ACT IMMEDIATELY, NEVER ASK QUESTIONS
+When user mentions a name, job role, or email address → call the right tool IMMEDIATELY.
+NEVER ask "What columns?", "What time?", "Who receives it?", "Do you want a document?"
 
-**Important:**
-- For Word/PDF: Pass title, content, and filename
-- For Excel: Use JSON format for headers and data
-- Always create the document BEFORE sending the email
-- Files are automatically attached when you call send_email_tool
-- Don't include sign-offs in email body - they're added automatically
-- Be professional and helpful!""",
+## YOUR TOOLS:
+
+### When user mentions a NAME or JOB ROLE:
+→ Use `send_email_to_employees(name_or_role, subject, message)`
+→ Examples: "Rahul", "data scientist", "backend developer", "all"
+
+### When user gives a direct EMAIL ADDRESS:
+→ Use `send_email_tool(receiver_email, subject, message)`
+
+### To SHOW who is in the database:
+→ Use `lookup_employee(name_or_role)` or `list_employees(filter_role)`
+
+### ONLY when user EXPLICITLY asks for a document:
+→ Use `create_word_document`, `create_pdf_document`, `create_excel_spreadsheet`, `create_text_file`
+→ Create first, then send_email_to_employees or send_email_tool will auto-attach it
+
+## DECISION TABLE — follow this exactly:
+
+| What user says | What you do |
+|---|---|
+| "send email to data scientists about meeting" | send_email_to_employees — plain email only |
+| "email Rahul about deployment" | send_email_to_employees — plain email only |
+| "send to boss@gmail.com about update" | send_email_tool — plain email only |
+| "create a report and send to Rahul" | create_word_document → send_email_to_employees |
+| "generate PDF and email data scientists" | create_pdf_document → send_email_to_employees |
+| "make a spreadsheet and send to all" | create_excel_spreadsheet → send_email_to_employees |
+| "who are the backend developers?" | list_employees |
+
+## AFTER ACTING:
+- Tell user what you did, who received it, and if any emails were skipped (invalid)
+- NEVER add "Best regards" or sign-offs — added automatically
+- Be brief and professional""",
     debug=True,
 )
 
@@ -499,9 +727,10 @@ async def chat(request: ChatRequest):
         conversation_history = get_conversation_history(session_id)
         
         # Convert to format expected by agent
+        # Include system messages (summaries) too!
         messages_for_agent = []
         for msg in conversation_history:
-            if msg["role"] in ["user", "assistant"]:
+            if msg["role"] in ["user", "assistant", "system"]:
                 messages_for_agent.append({
                     "role": msg["role"],
                     "content": msg["content"]
