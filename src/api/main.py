@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 from src.config import GROQ_API_KEY, EMAIL_ADDRESS
-from src.api.endpoints import chat, files, memory
+from src.api.endpoints import files, memory, employee, email, router
 
 app = FastAPI(
     title="DataCrew AI - Email Assistant API",
@@ -26,9 +26,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(chat.router)
 app.include_router(files.router)
 app.include_router(memory.router)
+app.include_router(employee.router)
+app.include_router(email.router)
+app.include_router(router.router)
 
 UPLOAD_DIR = Path("uploads")
 GENERATED_DIR = Path("generated_docs")
