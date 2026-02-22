@@ -239,3 +239,4 @@ allow_origins=["https://yourdomain.com"]
 - Multi-word job titles should work automatically
 
 **Built with FastAPI, LangChain, Groq, MongoDB, and MCP (Model Context Protocol)**
+
